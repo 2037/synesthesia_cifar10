@@ -27,7 +27,7 @@ synesthesia_cifar10/
 │   ├── config.py                     # Central config: device, paths, hyperparameters
 │   ├── data_loader.py                # Download, extraction, Dataset, DataLoaders
 │   ├── model.py                      # ColorPredictor CNN (BN + Dropout toggleable)
-│   ├── trainer.py                    # Training loop, early stopping, checkpoint save/load
+│   ├── trainer.py                    # Training loop with patience-based stopping, checkpointing
 │   ├── evaluator.py                  # Metrics (MSE/MAE/PSNR/SSIM) + all plots
 │   ├── experiments.py                # Hyperparameter sweep (Part 3 ablation study)
 │   └── utils.py                      # Shared helpers: model I/O, plot utilities
@@ -168,25 +168,32 @@ All defaults live in `src/config.py` and can be overridden via CLI flags.
 | Batch size | 128 | `config.py → BATCH_SIZE` |
 | Learning rate | 1e-3 | `config.py → LEARNING_RATE` |
 | Optimizer | Adam | `trainer.py` |
-| LR scheduler | ReduceLROnPlateau (factor=0.5, patience=3) | `config.py` |
-| Early stopping patience | 10 epochs | `config.py → EARLY_STOP_PATIENCE` |
+| **LR scheduler** | **ReduceLROnPlateau** (factor=0.5, patience=3) | `config.py → LR_SCHEDULER_*` |
+| **Early stopping** | **Patience-based via LR scheduler** (stops when LR becomes too small) | Implemented in `trainer.py` |
 | Max epochs | 5 (demo — increase for full training) | `config.py → NUM_EPOCHS` |
 | Train / Val / Test split | 80 / 10 / 10 % | `config.py → TRAIN_RATIO / VAL_RATIO` |
 | Random seed | 42 | `config.py → RANDOM_SEED` |
 
+**Note on Early Stopping:** We use PyTorch's `ReduceLROnPlateau` scheduler with a patience parameter. When validation loss stops improving for `patience` epochs, the learning rate is reduced. After multiple reductions, learning naturally stops, providing an elegant early stopping mechanism without custom implementation.
+
 ### Hyperparameter Ablation Sweep (`src/experiments.py`)
 
-Seven configurations are tested by default to document the effect of each choice:
+A **2×2 factorial ablation study** tests BatchNorm and Dropout at a fixed learning rate:
+
+**Fixed:** Learning Rate = 1e-2  
+**Variables:** BatchNorm (Yes/No) × Dropout (Yes/No)
 
 | # | Configuration | LR | BatchNorm | Dropout | p |
 |---|---------------|----|-----------|---------|---|
-| 1 | Baseline | 1e-3 | ✓ | ✓ | 0.2 |
-| 2 | High LR | 1e-2 | ✓ | ✓ | 0.2 |
-| 3 | Low LR | 1e-4 | ✓ | ✓ | 0.2 |
-| 4 | No BatchNorm | 1e-3 | ✗ | ✓ | 0.2 |
-| 5 | No Dropout | 1e-3 | ✓ | ✗ | 0.0 |
-| 6 | No BN + No Dropout | 1e-3 | ✗ | ✗ | 0.0 |
-| 7 | High Dropout | 1e-3 | ✓ | ✓ | 0.4 |
+| 1 | No BN, No Dropout | 1e-2 | ✗ | ✗ | 0.0 |
+| 2 | BN only | 1e-2 | ✓ | ✗ | 0.0 |
+| 3 | Dropout only | 1e-2 | ✗ | ✓ | 0.2 |
+| 4 | BN + Dropout | 1e-2 | ✓ | ✓ | 0.2 |
+
+This design systematically isolates:
+- The individual effect of BatchNorm
+- The individual effect of Dropout
+- Whether they interact synergistically or antagonistically
 
 Results are ranked by best validation MSE and saved to
 `outputs/hyperparameter_comparison_B.png` and `outputs/hyperparameter_results_B.csv`.

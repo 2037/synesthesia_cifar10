@@ -52,18 +52,27 @@ class ConvBlock(nn.Module):
         use_dropout: bool = True,
     ) -> None:
         super().__init__()
-        layers: list[nn.Module] = [
+        layers: list[nn.Module] = []
+        
+        # Convolution layer with 'same' padding to preserve spatial dimensions
+        layers.append(
             nn.Conv2d(
                 in_channels,
                 out_channels,
                 kernel_size=kernel_size,
                 padding="same",
-                bias=not use_batchnorm,   # bias subsumed when BN is active
-            ),
-        ]
+                bias=not use_batchnorm,   # Disable bias if BN is used (BN has its own bias)
+            )
+        )
+        
+        # BatchNorm2d: normalizes activations, helps with training stability
         if use_batchnorm:
             layers.append(nn.BatchNorm2d(out_channels))
+        
+        # LeakyReLU: allows small negative gradients (slope=0.1) to avoid dying ReLU
         layers.append(nn.LeakyReLU(negative_slope=0.1, inplace=True))
+        
+        # Dropout2d: randomly zeros entire feature maps for regularization
         if use_dropout and dropout_rate > 0:
             layers.append(nn.Dropout2d(p=dropout_rate))
 
@@ -108,44 +117,73 @@ class ColorPredictor(nn.Module):
         use_dropout: bool = True,
     ) -> None:
         super().__init__()
+        # Store config for inspection (used in notebook demonstrations)
         self.use_batchnorm = use_batchnorm
         self.use_dropout = use_dropout
 
+        # Shared kwargs for all ConvBlocks to ensure consistent regularization
         blk_kwargs = dict(
             dropout_rate=dropout_rate,
             use_batchnorm=use_batchnorm,
             use_dropout=use_dropout,
         )
 
-        # ── Encoder-style feature extraction ────────────────────────────────
-        self.block1 = ConvBlock(in_channels, 64,  kernel_size=3, **blk_kwargs)
-        self.block2 = ConvBlock(64,          128, kernel_size=3, **blk_kwargs)
-        self.block3 = ConvBlock(128,         64,  kernel_size=3, **blk_kwargs)
+        # ── Three-layer feature extraction pipeline ────────────────────────
+        # Architecture: 2 → 64 → 128 → 64 channels
+        # Each block applies: Conv3x3 → [BN] → LeakyReLU → [Dropout]
+        self.block1 = ConvBlock(in_channels, 64,  kernel_size=3, **blk_kwargs)  # Extract low-level features
+        self.block2 = ConvBlock(64,          128, kernel_size=3, **blk_kwargs)  # Expand representational capacity
+        self.block3 = ConvBlock(128,         64,  kernel_size=3, **blk_kwargs)  # Compress back down
 
-        # ── 1×1 conv collapses channels to single prediction ────────────────
+        # ── Output projection: 64 channels → 1 channel ──────────────────────
+        # 1×1 convolution acts as a learned linear combination of features
+        # Sigmoid maps outputs to [0, 1] to match normalized pixel values
         self.output_conv = nn.Sequential(
             nn.Conv2d(64, out_channels, kernel_size=1, padding="same"),
-            nn.Sigmoid(),
+            nn.Sigmoid(),  # Ensures output is in valid pixel range
         )
 
-        # Weight initialisation (He / Kaiming normal for LeakyReLU)
+        # Initialize weights using Kaiming (He) initialization for LeakyReLU
         self._init_weights()
 
     def _init_weights(self) -> None:
+        """
+        Initialize network weights using appropriate schemes for each layer type.
+        
+        - Conv2d: Kaiming normal initialization scaled for LeakyReLU (prevents
+          vanishing/exploding gradients by accounting for negative slope)
+        - BatchNorm2d: Standard initialization (weight=1, bias=0)
+        """
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
+                # Kaiming init: variance scaled by fan_out and nonlinearity
                 nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="leaky_relu")
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
             elif isinstance(m, nn.BatchNorm2d):
+                # Standard BN init: scale=1, shift=0
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.block1(x)
-        x = self.block2(x)
-        x = self.block3(x)
-        x = self.output_conv(x)
+        """
+        Forward pass through the network.
+        
+        Parameters
+        ----------
+        x : torch.Tensor, shape (B, 2, 32, 32)
+            Input with 2 RGB channels (e.g., Red and Green).
+            
+        Returns
+        -------
+        torch.Tensor, shape (B, 1, 32, 32)
+            Predicted target channel (e.g., Blue) with values in [0, 1].
+        """
+        # Sequential feature extraction (spatial dimensions preserved throughout)
+        x = self.block1(x)       # (B, 2, 32, 32) → (B, 64, 32, 32)
+        x = self.block2(x)       # (B, 64, 32, 32) → (B, 128, 32, 32)
+        x = self.block3(x)       # (B, 128, 32, 32) → (B, 64, 32, 32)
+        x = self.output_conv(x)  # (B, 64, 32, 32) → (B, 1, 32, 32)
         return x
 
     # ── Convenience helpers ──────────────────────────────────────────────────

@@ -49,7 +49,8 @@ VAL_RATIO: float = 0.10
 TEST_RATIO: float = 0.10          # implied (1 - TRAIN - VAL)
 
 # ─── DataLoader ───────────────────────────────────────────────────────────────
-BATCH_SIZE: int = 128
+# Use smaller batch size on MPS (Apple Silicon) for stability
+BATCH_SIZE: int = 64 if str(DEVICE) == "mps" else 128
 # On MPS, num_workers > 0 can cause issues; fall back to 0.
 NUM_WORKERS: int = 0 if str(DEVICE) == "mps" else 4
 PIN_MEMORY: bool = str(DEVICE) != "mps"   # pin_memory not supported on MPS
@@ -62,8 +63,12 @@ TARGET_CHANNEL: str = "B"
 # ─── Training ─────────────────────────────────────────────────────────────────
 LEARNING_RATE: float = 1e-3
 NUM_EPOCHS: int = 5                # set low for quick demo; increase for full run
-EARLY_STOP_PATIENCE: int = 10
-EARLY_STOP_MIN_DELTA: float = 1e-5
+
+# ReduceLROnPlateau scheduler parameters (provides implicit early stopping):
+# - patience: epochs to wait before reducing LR when val_loss plateaus
+# - factor: multiply LR by this value when reducing (e.g., 0.5 = halve LR)
+# The patience mechanism prevents overfitting: when validation loss stops
+# improving, LR is reduced, and eventually learning naturally stops.
 LR_SCHEDULER_PATIENCE: int = 3
 LR_SCHEDULER_FACTOR: float = 0.5
 

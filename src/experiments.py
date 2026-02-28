@@ -1,21 +1,28 @@
 """
-experiments.py — Hyperparameter sweep for Part 3.
+experiments.py — Hyperparameter ablation study for Part 3.
 
-Trains the ColorPredictor under several configurations and saves a
-comparison bar-chart + CSV to outputs/.
+This module trains the ColorPredictor under different regularization configurations
+to systematically analyze the effects of BatchNorm and Dropout.
 
-Configurations tested
----------------------
-  1. Baseline          : LR=1e-3, BN=True,  Drop=True,  p=0.2
-  2. High LR           : LR=1e-2, BN=True,  Drop=True,  p=0.2
-  3. Low LR            : LR=1e-4, BN=True,  Drop=True,  p=0.2
-  4. No BatchNorm      : LR=1e-3, BN=False, Drop=True,  p=0.2
-  5. No Dropout        : LR=1e-3, BN=True,  Drop=False, p=0.0
-  6. No BN + No Dropout: LR=1e-3, BN=False, Drop=False, p=0.0
-  7. High Dropout      : LR=1e-3, BN=True,  Drop=True,  p=0.4
+Ablation Study Design (2×2 Factorial)
+--------------------------------------
+Fixed: Learning Rate = 1e-2
+Variables: BatchNorm (Yes/No) × Dropout (Yes/No)
+
+Configurations tested:
+  1. No BN, No Dropout : LR=1e-2, BN=False, Drop=False, p=0.0  (baseline, no regularization)
+  2. BN only           : LR=1e-2, BN=True,  Drop=False, p=0.0  (normalization only)
+  3. Dropout only      : LR=1e-2, BN=False, Drop=True,  p=0.2  (stochastic regularization only)
+  4. BN + Dropout      : LR=1e-2, BN=True,  Drop=True,  p=0.2  (both regularization techniques)
+
+This design allows us to observe:
+- The individual effect of BatchNorm
+- The individual effect of Dropout
+- Whether they interact synergistically or antagonistically
 
 Each configuration is trained for a fixed number of epochs (defaults to
 cfg.NUM_EPOCHS so the demo stays fast — increase for a thorough study).
+Results are saved as CSV and comparison plots in the outputs/ directory.
 
 Usage (CLI):
     python -m src.experiments [--target B] [--epochs 10]
@@ -63,13 +70,10 @@ class ExperimentConfig:
 # ─── Pre-defined sweep ────────────────────────────────────────────────────────
 
 SWEEP: List[ExperimentConfig] = [
-    ExperimentConfig("Baseline",            lr=1e-3, use_batchnorm=True,  use_dropout=True,  dropout_rate=0.2),
-    ExperimentConfig("High LR (1e-2)",      lr=1e-2, use_batchnorm=True,  use_dropout=True,  dropout_rate=0.2),
-    ExperimentConfig("Low LR (1e-4)",       lr=1e-4, use_batchnorm=True,  use_dropout=True,  dropout_rate=0.2),
-    ExperimentConfig("No BatchNorm",        lr=1e-3, use_batchnorm=False, use_dropout=True,  dropout_rate=0.2),
-    ExperimentConfig("No Dropout",          lr=1e-3, use_batchnorm=True,  use_dropout=False, dropout_rate=0.0),
-    ExperimentConfig("No BN + No Dropout",  lr=1e-3, use_batchnorm=False, use_dropout=False, dropout_rate=0.0),
-    ExperimentConfig("High Dropout (0.4)",  lr=1e-3, use_batchnorm=True,  use_dropout=True,  dropout_rate=0.4),
+    ExperimentConfig("No BN, No Dropout", lr=1e-2, use_batchnorm=False, use_dropout=False, dropout_rate=0.0),
+    ExperimentConfig("BN only",           lr=1e-2, use_batchnorm=True,  use_dropout=False, dropout_rate=0.0),
+    ExperimentConfig("Dropout only",      lr=1e-2, use_batchnorm=False, use_dropout=True,  dropout_rate=0.2),
+    ExperimentConfig("BN + Dropout",      lr=1e-2, use_batchnorm=True,  use_dropout=True,  dropout_rate=0.2),
 ]
 
 
@@ -87,19 +91,44 @@ def _train_one_epoch(
     """Run one epoch; return mean loss."""
     model.train(train)
     total_loss = 0.0
-    bar = tqdm(loader, desc=desc, leave=False, unit="batch", dynamic_ncols=True)
+    num_batches = len(loader)
+    
+    # Reduce progress bar update frequency for MPS stability
+    is_mps = str(device) == "mps"
+    bar = tqdm(loader, desc=desc, leave=False, unit="batch", 
+               dynamic_ncols=True, mininterval=1.0 if is_mps else 0.1)
+    
     with torch.set_grad_enabled(train):
-        for x_batch, y_batch, *_ in bar:
-            x_batch = x_batch.to(device, non_blocking=cfg.PIN_MEMORY)
-            y_batch = y_batch.to(device, non_blocking=cfg.PIN_MEMORY)
+        for batch_idx, (x_batch, y_batch, *_) in enumerate(bar):
+            # Use blocking transfers for MPS to avoid hangs
+            x_batch = x_batch.to(device, non_blocking=False)
+            y_batch = y_batch.to(device, non_blocking=False)
+            
             preds = model(x_batch)
             loss = criterion(preds, y_batch)
+            
             if train:
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-            total_loss += loss.item() * x_batch.size(0)
-            bar.set_postfix(loss=f"{loss.item():.5f}")
+            
+            # Extract loss value before accumulating
+            loss_val = loss.item()
+            total_loss += loss_val * x_batch.size(0)
+            
+            # Update progress bar less frequently
+            if batch_idx % 10 == 0 or batch_idx == num_batches - 1:
+                bar.set_postfix(loss=f"{loss_val:.5f}")
+            
+            # Clear MPS cache every 20 batches to prevent memory buildup
+            if is_mps and batch_idx % 20 == 0:
+                torch.mps.empty_cache()
+    
+    # Final synchronization for MPS
+    if is_mps:
+        torch.mps.synchronize()
+        torch.mps.empty_cache()
+    
     return total_loss / len(loader.dataset)  # type: ignore[arg-type]
 
 
@@ -110,47 +139,77 @@ def run_experiment(
     num_epochs: int,
 ) -> Dict[str, object]:
     """
-    Train one configuration and return a result dict with:
-      name, best_val_loss, final_train_loss, train_losses, val_losses, elapsed_s
+    Train a single experiment configuration and return performance metrics.
+    
+    Parameters
+    ----------
+    exp : ExperimentConfig
+        Configuration specifying LR, BatchNorm, Dropout settings.
+    train_loader : DataLoader
+        Training data loader (shared across all experiments for fair comparison).
+    val_loader : DataLoader
+        Validation data loader (shared across all experiments).
+    num_epochs : int
+        Number of training epochs.
+        
+    Returns
+    -------
+    Dict with keys: name, lr, use_batchnorm, use_dropout, dropout_rate,
+                    best_val_loss, final_train_loss, train_losses, 
+                    val_losses, elapsed_s
     """
     logger.info(f"  ▶ {exp.name!r:30s}  lr={exp.lr}  BN={exp.use_batchnorm}  "
                 f"Drop={exp.use_dropout}  p={exp.dropout_rate}")
 
+    # Initialize model with specified regularization configuration
     model = ColorPredictor(
         use_batchnorm=exp.use_batchnorm,
         use_dropout=exp.use_dropout,
         dropout_rate=exp.dropout_rate,
     ).to(cfg.DEVICE)
 
+    # Loss function and optimizer (same for all experiments)
     criterion = nn.MSELoss()
     optimizer = Adam(model.parameters(), lr=exp.lr)
+    
+    # LR scheduler with patience (provides early stopping behavior)
     scheduler = ReduceLROnPlateau(
         optimizer, mode="min",
-        factor=cfg.LR_SCHEDULER_FACTOR,
-        patience=cfg.LR_SCHEDULER_PATIENCE,
+        factor=cfg.LR_SCHEDULER_FACTOR,     # Multiply LR by 0.5 on plateau
+        patience=cfg.LR_SCHEDULER_PATIENCE,  # Wait 3 epochs before reducing
     )
 
+    # Track best validation loss and loss curves
     best_val_loss = float("inf")
     train_losses: List[float] = []
     val_losses:   List[float] = []
 
+    # Training loop with progress bar
     t_start = time.time()
     epoch_bar = tqdm(range(1, num_epochs + 1), desc=f"  {exp.name}", unit="epoch",
                      dynamic_ncols=True, leave=False)
     for epoch in epoch_bar:
+        # Run training epoch (with gradient updates)
         tl = _train_one_epoch(
             model, train_loader, criterion, optimizer,
             cfg.DEVICE, train=True,
             desc=f"    Train {epoch:02d}/{num_epochs}",
         )
+        # Run validation epoch (no gradient updates)
         vl = _train_one_epoch(
             model, val_loader, criterion, None,
             cfg.DEVICE, train=False,
             desc=f"    Val   {epoch:02d}/{num_epochs}",
         )
+        
+        # Record losses for analysis
         train_losses.append(tl)
         val_losses.append(vl)
+        
+        # Update learning rate based on validation loss (patience-based)
         scheduler.step(vl)
+        
+        # Track best validation performance
         best_val_loss = min(best_val_loss, vl)
         epoch_bar.set_postfix(train=f"{tl:.5f}", val=f"{vl:.5f}")
 
