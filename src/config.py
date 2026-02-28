@@ -50,7 +50,7 @@ TEST_RATIO: float = 0.10          # implied (1 - TRAIN - VAL)
 
 # ─── DataLoader ───────────────────────────────────────────────────────────────
 # Use smaller batch size on MPS (Apple Silicon) for stability
-BATCH_SIZE: int = 64 if str(DEVICE) == "mps" else 128
+BATCH_SIZE: int = 128 if str(DEVICE) == "mps" else 128
 # On MPS, num_workers > 0 can cause issues; fall back to 0.
 NUM_WORKERS: int = 0 if str(DEVICE) == "mps" else 4
 PIN_MEMORY: bool = str(DEVICE) != "mps"   # pin_memory not supported on MPS
@@ -61,7 +61,7 @@ PIN_MEMORY: bool = str(DEVICE) != "mps"   # pin_memory not supported on MPS
 TARGET_CHANNEL: str = "B"
 
 # ─── Training ─────────────────────────────────────────────────────────────────
-LEARNING_RATE: float = 1e-3
+LEARNING_RATE: float = 1e-2
 NUM_EPOCHS: int = 5                # set low for quick demo; increase for full run
 
 # ReduceLROnPlateau scheduler parameters (provides implicit early stopping):

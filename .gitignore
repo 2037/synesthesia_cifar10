@@ -64,15 +64,13 @@ datasets/
 *.npz
 
 # Model outputs and checkpoints
-models/
-checkpoints/
-saved_models/
+# models/
+# checkpoints/
+# saved_models/
 *.pb
 *.onnx
 
 # Training logs and outputs
-logs/
-outputs/
 runs/
 wandb/
 mlruns/
